@@ -1,0 +1,180 @@
+Option Explicit
+
+Dim WeekCol  As Long
+Dim InvRow   As Long
+Dim PlnRow   As Long
+Dim CoverWk  As Long
+Dim WorkHRS  As Long
+Dim TargetEff As Double
+
+' ─────────────────────────────────────────────
+'  MAIN
+' ─────────────────────────────────────────────
+Sub FastBalance()
+
+    Dim ws          As Worksheet
+    Dim lastCol     As Long
+    Dim lastRow     As Long
+    Dim shortageRow As Long
+    Dim dataArr     As Variant   ' cached sheet data
+    Dim redCells    As Object    ' Dictionary: key = "r,c" -> mark for red font
+
+    Set ws = ActiveSheet
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents   = False
+    Application.Calculation    = xlCalculationManual
+    Application.CalculateFull
+
+    ' -- Settings --
+    WeekCol   = CLng(ws.Cells(3, 15).Value)
+    PlnRow    = CLng(ws.Cells(7, 15).Value)
+    InvRow    = CLng(ws.Cells(6, 15).Value)
+    CoverWk   = CLng(ws.Cells(8, 15).Value)
+    WorkHRS   = CLng(ws.Cells(5, 15).Value)
+    TargetEff = CDbl(ws.Cells(9, 15).Value)
+
+    lastCol = ws.Cells(11, ws.Columns.Count).End(xlToLeft).Column
+    lastRow = ws.Cells(ws.Rows.Count, 3).End(xlUp).Row
+
+    ' -- Red-font collector (apply once at end) --
+    Set redCells = CreateObject("Scripting.Dictionary")
+
+    ' -- Main loop --
+    Do While WeekCol <= lastCol
+
+        ' Rebuild data snapshot after every write
+        dataArr = ws.Range(ws.Cells(1, WeekCol), ws.Cells(lastRow, lastCol)).Value
+
+        shortageRow = FindNearestShortage_Arr( _
+                          dataArr, WeekCol, lastCol, lastRow, redCells)
+
+        If shortageRow = 0 Then Exit Do          ' no more shortages
+
+        ' Skip week if zero work hours
+        If ws.Cells(WorkHRS, WeekCol).Value = 0 Then
+            WeekCol = WeekCol + 1
+            GoTo NextLoop
+        End If
+
+        If ws.Cells(10, WeekCol).Value > TargetEff Then
+
+            ' Try adding 40 units
+            ws.Cells(shortageRow + 2, WeekCol).Value = _
+                ws.Cells(shortageRow + 2, WeekCol).Value + 40
+            ws.Calculate
+
+            If ws.Cells(10, WeekCol).Value < TargetEff Then
+                ' Undo - efficiency blown
+                ws.Cells(shortageRow + 2, WeekCol).Value = _
+                    ws.Cells(shortageRow + 2, WeekCol).Value - 40
+                ws.Calculate
+
+                ' Still short?
+                If ws.Cells(shortageRow, WeekCol).Value < 0 Then
+                    ApplyRedFont ws, redCells          ' paint before msgbox
+                    MsgBox "STOPPED: Efficiency limit reached while shortage still exists." & vbCrLf & vbCrLf & _
+                           "Part: "               & ws.Cells(shortageRow - 1, 2).Value & vbCrLf & _
+                           "Week: "               & WeekCol & vbCrLf & _
+                           "Remaining Shortage: " & ws.Cells(shortageRow, WeekCol).Value, _
+                           vbCritical, "Planning Stopped"
+                    GoTo SafeExit
+                End If
+            End If
+
+            WeekCol = WeekCol + 1
+
+        Else
+            WeekCol = WeekCol + 1
+        End If
+
+NextLoop:
+    Loop
+
+    ApplyRedFont ws, redCells
+    MsgBox "Balance Finished Successfully", vbInformation
+
+SafeExit:
+    Application.Calculation    = xlCalculationAutomatic
+    Application.ScreenUpdating = True
+    Application.EnableEvents   = True
+
+End Sub
+
+' ─────────────────────────────────────────────
+'  FIND NEAREST SHORTAGE  (array-based, fast)
+'  dataArr     : 2-D array read from ws (1-based rows/cols)
+'  currentWeek : absolute column number on ws
+'  lastCol     : absolute last column on ws
+'  lastRow     : absolute last row on ws
+'  redCells    : Dictionary collecting cells to color later
+' ─────────────────────────────────────────────
+Function FindNearestShortage_Arr( _
+             dataArr     As Variant, _
+             currentWeek As Long, _
+             lastCol     As Long, _
+             lastRow     As Long, _
+             redCells    As Object) As Long
+
+    Dim chkWeek As Long
+    Dim chkRow  As Long
+    Dim arrCol  As Long
+    Dim arrRow  As Long
+    Dim cellVal As Variant
+    Dim key     As String
+
+    For chkWeek = currentWeek To lastCol
+        arrCol = chkWeek - currentWeek + 1
+
+        chkRow = InvRow
+        Do While chkRow <= lastRow
+            arrRow = chkRow
+
+            If arrRow >= 1 And arrRow <= UBound(dataArr, 1) And _
+               arrCol >= 1 And arrCol <= UBound(dataArr, 2) Then
+
+                cellVal = dataArr(arrRow, arrCol)
+
+                If IsNumeric(cellVal) Then
+                    If CDbl(cellVal) < 0 Then
+
+                        ' Queue red font if within cover window
+                        If (chkWeek - currentWeek) < CoverWk Then
+                            key = (chkRow + 2) & "," & currentWeek
+                            If Not redCells.Exists(key) Then
+                                redCells.Add key, True
+                            End If
+                        End If
+
+                        FindNearestShortage_Arr = chkRow
+                        Exit Function
+                    End If
+                End If
+            End If
+
+            chkRow = chkRow + 7
+        Loop
+    Next chkWeek
+
+    FindNearestShortage_Arr = 0
+
+End Function
+
+' ─────────────────────────────────────────────
+'  APPLY RED FONT  (single pass at the end)
+' ─────────────────────────────────────────────
+Sub ApplyRedFont(ws As Worksheet, redCells As Object)
+
+    Dim key     As Variant
+    Dim parts() As String
+    Dim r       As Long
+    Dim c       As Long
+
+    For Each key In redCells.Keys
+        parts = Split(CStr(key), ",")
+        r = CLng(parts(0))
+        c = CLng(parts(1))
+        ws.Cells(r, c).Font.Color = RGB(255, 0, 0)
+    Next key
+
+End Sub
